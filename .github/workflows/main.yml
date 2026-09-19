@@ -1,26 +1,24 @@
-name: Build and UPX Obfuscate
+name: Build Project
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch:
+  workflow_dispatch: # 允许在 GitHub UI 手动触发运行
 
 jobs:
-  build-and-pack:
+  build:
     runs-on: windows-latest
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 【新增】自动替换 ntdllp.lib 为 ntdll.lib
+    # 自动替换 ntdllp.lib 为 ntdll.lib，解决 GitHub Actions runner 缺少 WDK 导致的链接报错
     - name: Patch ntdllp.lib dependency
       shell: pwsh
       run: |
-        # GitHub runner 没有 WDK，所以找不到 ntdllp.lib。
-        # 我们将其替换为标准 Windows SDK 自带的 ntdll.lib，导出的 API 是一致的。
         Get-ChildItem -Recurse -Include "*.cpp", "*.h", "*.vcxproj" | ForEach-Object {
             $content = Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
             if ($content -and $content -match 'ntdllp\.lib') {
@@ -30,58 +28,24 @@ jobs:
             }
         }
 
+    # 配置 MSBuild 环境变量
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
+    # 编译解决方案 (默认使用 Release 配置和 x64 平台)
     - name: Build Solution
       shell: cmd
       run: |
         echo "Building simple-krw-vuln.slnx..."
         msbuild simple-krw-vuln.slnx /p:Configuration=Release /p:Platform=x64 /m /v:m
 
-    - name: Install UPX
-      shell: pwsh
-      run: |
-        $upxUrl = "https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-win64.zip"
-        Write-Host "Downloading UPX from $upxUrl"
-        Invoke-WebRequest -Uri $upxUrl -OutFile "upx.zip"
-        Expand-Archive -Path "upx.zip" -DestinationPath "C:\upx"
-        echo "C:\upx\upx-4.2.4-win64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        upx --version
-
-    - name: Obfuscate Artifacts with UPX
-      shell: pwsh
-      run: |
-        $outputDirs = @(".\x64\Release", ".\Release", ".\x64\Debug", ".\Debug")
-        $processed = $false
-
-        foreach ($dir in $outputDirs) {
-            if (Test-Path $dir) {
-                $processed = $true
-                Write-Host "Processing directory: $dir"
-                $files = Get-ChildItem -Path $dir -Include "*.exe", "*.sys" -Recurse -File
-                
-                foreach ($file in $files) {
-                    Write-Host "Packing $($file.Name)..."
-                    try {
-                        upx --best --force $file.FullName
-                        Write-Host "Successfully packed $($file.Name)"
-                    } catch {
-                        Write-Warning "Failed to pack $($file.Name). It might be an unsupported format (e.g. 64-bit driver)."
-                    }
-                }
-            }
-        }
-
-        if (-not $processed) {
-            Write-Error "No standard Release directories found."
-            exit 1
-        }
-
+    # 上传编译产物 (包含 .exe 和 .sys)
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: KRW-Vuln-Packed-Binaries
+        name: Compiled-Binaries
         path: |
           x64/Release/**/*
           Release/**/*
+          */x64/Release/**/*
+          */Release/**/*
