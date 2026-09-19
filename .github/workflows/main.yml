@@ -1,0 +1,84 @@
+name: Build and UPX Obfuscate
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build-and-pack:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 1. 配置 MSBuild 环境变量
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    # 2. 编译解决方案 (默认使用 Release 配置和 x64 平台)
+    - name: Build Solution
+      shell: cmd
+      run: |
+        echo "Building simple-krw-vuln.slnx..."
+        msbuild simple-krw-vuln.slnx /p:Configuration=Release /p:Platform=x64 /m /v:m
+
+    # 3. 下载并安装 UPX (使用 4.2.4+ 版本以支持 64位 PE 文件)
+    - name: Install UPX
+      shell: pwsh
+      run: |
+        $upxUrl = "https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-win64.zip"
+        Write-Host "Downloading UPX from $upxUrl"
+        Invoke-WebRequest -Uri $upxUrl -OutFile "upx.zip"
+        Expand-Archive -Path "upx.zip" -DestinationPath "C:\upx"
+        # 将 UPX 目录添加到环境变量
+        echo "C:\upx\upx-4.2.4-win64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        upx --version
+
+    # 4. 自动查找产物并使用 UPX 混淆
+    - name: Obfuscate Artifacts with UPX
+      shell: pwsh
+      run: |
+        # 常见的 MSBuild 输出目录
+        $outputDirs = @(".\x64\Release", ".\Release", ".\x64\Debug", ".\Debug")
+        $processed = $false
+
+        foreach ($dir in $outputDirs) {
+            if (Test-Path $dir) {
+                $processed = $true
+                Write-Host "Processing directory: $dir"
+                
+                # 查找所有 .exe 和 .sys 文件
+                $files = Get-ChildItem -Path $dir -Include "*.exe", "*.sys" -Recurse -File
+                
+                foreach ($file in $files) {
+                    Write-Host "Packing $($file.Name)..."
+                    # --best: 最高压缩率
+                    # --force: 强制覆盖
+                    # 注意：UPX 对 64位驱动(.sys)的支持有限，可能会失败或破坏驱动
+                    try {
+                        upx --best --force $file.FullName
+                        Write-Host "Successfully packed $($file.Name)"
+                    } catch {
+                        Write-Warning "Failed to pack $($file.Name). It might be an unsupported format (e.g., 64-bit driver)."
+                    }
+                }
+            }
+        }
+
+        if (-not $processed) {
+            Write-Error "No standard Release directories found."
+            exit 1
+        }
+
+    # 5. 上传混淆后的产物
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: KRW-Vuln-Packed-Binaries
+        path: |
+          x64/Release/**/*
+          Release/**/*
